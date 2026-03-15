@@ -631,11 +631,11 @@ float4 s_fluid_iridescence(float2 uv, texture2d<float> tex, constant ShaderParam
     return float4(clamp(result, 0.0, 1.0), 1.0);
 }
 
-// ─── 20: VGA-256 ─────────────────────────────────────────────────────────────
-// Early-90s VGA CRT: P22 phosphor glow, triangular dot-pitch shadow mask,
-// convergence error (per-channel lateral offset), luminance-adaptive scanlines,
-// 9300K colour temperature.
-// p0=curve(0.12)  p1=glow(0.80)  p2=scanlines(0.70)  p3=mask(0.55)
+// ─── 20: Seurat ───────────────────────────────────────────────────────────────
+// Early-90s VGA CRT: 2D circular phosphor dots (P22), triangular dot-pitch,
+// convergence error, phosphor glow + outer bloom. Scanlines emerge from the
+// phosphor vertical shape — guaranteed alignment with the mask.
+// p0=curve(0.12)  p1=glow(0.60)  p2=mask(0.90)  p3=bloom(0.80)
 float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
 
@@ -686,32 +686,47 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     }
     float3 glowSrc = (blurH + blurV) * 0.5;
 
-    // ── 5. Additive phosphor glow ─────────────────────────────────────────────
-    float luma = dot(glowSrc, float3(0.2126, 0.7152, 0.0722));
-    float3 phosphorTint = float3(1.08, 1.02, 0.82);
-    float3 color = baseLinear + glowSrc * phosphorTint * (luma * luma) * sp.p1;
+    // ── 5. P22 phosphor tint constants ───────────────────────────────────────
+    float3 phosphorTint = float3(1.08, 1.02, 0.82);  // P22: R redder, B cooler
 
-    // ── 6. Luminance-adaptive scanlines — 200 lines, not input-video lines ────
-    float scanPos    = fract(w.y * emuH);
-    float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
-    float maxDim     = sp.p2;
-    float minDim     = sp.p2 * 0.12;
-    float scanDepth  = mix(maxDim, minDim, clamp(brightness, 0.0, 1.0));
-    color *= 1.0 - scanDepth * (1.0 - sin(scanPos * M_PI_F));
+    // ── 6. 2D phosphor dot geometry — mask + scanlines unified ───────────────
+    // Position within the current VGA pixel cell (0→1 in each axis).
+    // Odd rows shift by ½ pixel → brick/triangular dot pitch.
+    // The phosphor vertical falloff IS the scanline beam — the same coordinate
+    // drives both, so mask and scanlines are perfectly aligned by construction.
+    float rowOff   = fmod(floor(w.y * emuH), 2.0) * 0.5;
+    float2 localUV = float2(fract(w.x * emuW + rowOff), fract(w.y * emuH));
 
-    // ── 7. Shadow mask — one R/G/B triad per VGA pixel (brick pattern) ────────
-    // fract(w.x * emuW) = position 0→1 within the current VGA pixel column.
-    // Thirds divide each pixel into its R, G, B phosphor stripe.
-    // Row offset of 0.5 pixels staggers alternate rows → triangular dot pitch.
-    float rowShift  = floor(w.y * emuH) * 0.5;
-    float maskPhase = fract(w.x * emuW + rowShift);
-    float dark      = 1.0 - sp.p3;
-    float3 maskCol  = (maskPhase < 0.333) ? float3(1.0, dark, dark)
-                    : (maskPhase < 0.667) ? float3(dark, 1.0, dark)
-                    :                       float3(dark, dark, 1.0);
-    color *= mix(float3(1.0), maskCol, sp.p3);
+    // Aspect-correct Y so dots appear circular on a 16:9 display.
+    // VGA Mode 13h pixels are slightly taller than wide at 16:9.
+    const float pAspect = (emuH / emuW) * (16.0 / 9.0);  // ≈ 1.11
 
-    // ── 7. VGA colour temperature — 9300K (cool blue-white) ──────────────────
+    // Three phosphor centres per VGA pixel: R=1/6, G=3/6, B=5/6 (horizontal).
+    // All centred at y=0.5. Vertical falloff from y=0.5 creates scanline gap.
+    const float phosX[3] = { 1.0/6.0, 3.0/6.0, 5.0/6.0 };
+    const float phosR     = 0.28;   // radius in pixel-local units
+
+    float3 dotMask  = float3(0.0);
+    float3 haloMask = float3(0.0);
+    for (int ch = 0; ch < 3; ch++) {
+        float dx   = localUV.x - phosX[ch];
+        float dy   = (localUV.y - 0.5) * pAspect;
+        float dist = sqrt(dx*dx + dy*dy);
+        dotMask[ch]  = smoothstep(phosR, phosR * 0.55, dist);         // hard dot, soft edge
+        haloMask[ch] = exp(-dist * dist / (phosR * phosR * 1.8));     // wider inner halo
+    }
+
+    // p1=Glow: inner halo. p2=Mask: how much to apply the dot pattern (0=off, 1=full).
+    float3 phosCol = dotMask + haloMask * sp.p1;
+    float3 color   = mix(baseLinear, baseLinear * phosCol, sp.p2) * phosphorTint;
+
+    // ── 7. Phosphor persistence / motion bloom ────────────────────────────────
+    // Wide outer bloom from the oversampled Gaussian approximates P22 afterglow
+    // visible on bright fast-moving subjects. p3=Bloom controls intensity.
+    float lumaBright = dot(baseLinear, float3(0.2126, 0.7152, 0.0722));
+    color += glowSrc * phosphorTint * (lumaBright * lumaBright) * sp.p3;
+
+    // ── 8. VGA colour temperature — 9300K (cool blue-white) ──────────────────
     color *= float3(0.95, 0.97, 1.05);
 
     // ── 8. Vignette + corner rounding ─────────────────────────────────────────
