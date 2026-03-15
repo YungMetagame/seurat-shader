@@ -30,6 +30,7 @@ let shaderOptions: [ShaderOption] = [
     ShaderOption(id: 17, name: "Yeetron",       desc: "Per-pixel scanline dimming + RGB channel weighting"),
     ShaderOption(id: 18, name: "Yee64",             desc: "C64-style — Gaussian pixel blur + scanline dimming"),
     ShaderOption(id: 19, name: "Fluid Iridescence", desc: "fBm turbulence distortion + oil-slick YIQ hue shift"),
+    ShaderOption(id: 20, name: "VGA 256",           desc: "P22 phosphor glow, brick dot-pitch mask, convergence error, 9300K"),
 ]
 
 // ─── Per-shader parameter definitions ────────────────────────────────────────
@@ -114,6 +115,12 @@ let shaderParamDefs: [UInt32: [ShaderParam]] = [
         ShaderParam(name: "Strength",    min: 0.0,  max: 0.08, defaultValue: 0.025),
         ShaderParam(name: "Scale",       min: 0.5,  max: 6.0,  defaultValue: 2.5),
         ShaderParam(name: "Iridescence", min: 0.0,  max: 2.0,  defaultValue: 0.8),
+    ],
+    20: [ // VGA 256
+        ShaderParam(name: "Curve",     min: 0.0, max: 0.5,  defaultValue: 0.12),
+        ShaderParam(name: "Glow",      min: 0.0, max: 2.0,  defaultValue: 0.80),
+        ShaderParam(name: "Scanlines", min: 0.0, max: 1.0,  defaultValue: 0.70),
+        ShaderParam(name: "Mask",      min: 0.0, max: 1.0,  defaultValue: 0.55),
     ],
 ]
 
