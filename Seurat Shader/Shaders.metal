@@ -634,10 +634,10 @@ float4 s_fluid_iridescence(float2 uv, texture2d<float> tex, constant ShaderParam
 // ─── 20: VGA-256 ─────────────────────────────────────────────────────────────
 // Early-90s VGA CRT: P22 phosphor glow, triangular dot-pitch shadow mask,
 // convergence error (per-channel lateral offset), luminance-adaptive scanlines,
-// 9300K colour temperature.
+// interlace field simulation, 9300K colour temperature.
 // All CRT physics are anchored to VGA Mode 13h (320×200) — independent of the
-// input video resolution. UV is snapped to the emulation grid first (line
-// doubling), then scanlines/mask/blur operate at that fixed logical scale.
+// input video resolution. Pipeline: snap UV to emulation grid (line doubling) →
+// frame→field conversion → CRT effects (glow, scanlines, mask).
 // p0=curve(0.12)  p1=glow(0.80)  p2=scanlines(0.70)  p3=mask(0.55)
 float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
@@ -657,16 +657,27 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     // for every pair of display rows, exactly as real VGA hardware did.
     float2 snapUV = (floor(w * float2(emuW, emuH)) + 0.5) / float2(emuW, emuH);
 
-    // ── 3. Convergence error — per-channel lateral offset ─────────────────────
+    // ── 3. Frame → field conversion (interlace simulation) ────────────────────
+    // A real CRT draws alternating fields at 60 Hz: field 0 = even rows,
+    // field 1 = odd rows. Rows not in the current field show residual phosphor
+    // (P22 decays to ~15 % brightness in the ~16 ms between refreshes).
+    // This runs before any CRT effects so inactive-field rows don't contribute
+    // to the phosphor glow calculation.
+    int   fieldIdx    = int(sp.time * 60.0) % 2;
+    int   logRow      = int(w.y * emuH);
+    float inField     = float((logRow % 2) == fieldIdx);
+    float fieldGate   = mix(0.15, 1.0, inField);   // 0.15 = P22 phosphor residual
+
+    // ── 4. Convergence error — per-channel lateral offset ─────────────────────
     // Offset is 1 logical VGA pixel wide, visible at any input resolution.
     float cx = 1.0 / emuW;
     float3 base;
     base.r = tex.sample(s, snapUV + float2(-cx, 0.0)).r;
     base.g = tex.sample(s, snapUV).g;
     base.b = tex.sample(s, snapUV + float2( cx, 0.0)).b;
-    float3 baseLinear = lin(base);
+    float3 baseLinear = lin(base) * fieldGate;
 
-    // ── 4. P22 phosphor persistence — 7-tap Gaussian, per-channel step ────────
+    // ── 5. P22 phosphor persistence — 7-tap Gaussian, per-channel step ────────
     // Steps are in emulation-pixel units so blur radius is resolution-invariant.
     // R phosphor decays slowest (widest spread), B fastest (narrowest).
     float gw[7] = { 0.0625, 0.0938, 0.2188, 0.2500, 0.2188, 0.0938, 0.0625 };
@@ -688,12 +699,12 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     }
     float3 glowSrc = (blurH + blurV) * 0.5;
 
-    // ── 5. Additive phosphor glow ─────────────────────────────────────────────
+    // ── 6. Additive phosphor glow ─────────────────────────────────────────────
     float luma = dot(glowSrc, float3(0.2126, 0.7152, 0.0722));
     float3 phosphorTint = float3(1.08, 1.02, 0.82);
     float3 color = baseLinear + glowSrc * phosphorTint * (luma * luma) * sp.p1;
 
-    // ── 6. Luminance-adaptive scanlines — 200 lines, resolution-invariant ─────
+    // ── 7. Luminance-adaptive scanlines — 200 lines, resolution-invariant ─────
     // scanPos is in emulation-line units so exactly 200 gaps appear regardless
     // of whether the input video is 480p, 1080p, or 4K.
     float scanPos    = fract(w.y * emuH);
@@ -703,7 +714,7 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     float scanDepth  = mix(maxDim, minDim, clamp(brightness, 0.0, 1.0));
     color *= 1.0 - scanDepth * (1.0 - sin(scanPos * M_PI_F));
 
-    // ── 7. Shadow mask — triangular dot-pitch, 3 sub-pixels per logical pixel ──
+    // ── 8. Shadow mask — triangular dot-pitch, 3 sub-pixels per logical pixel ──
     // emuW * 3.0 total sub-pixels = exactly 1 RGB triad per VGA pixel, matching
     // real VGA shadow mask geometry (~0.28 mm pitch on a 14" monitor).
     float rowShift  = floor(w.y * emuH) * 0.5;
@@ -714,10 +725,10 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
                     :                       float3(dark, dark, 1.0);
     color *= mix(float3(1.0), maskCol, sp.p3);
 
-    // ── 7. VGA colour temperature — 9300K (cool blue-white) ──────────────────
+    // ── 9. VGA colour temperature — 9300K (cool blue-white) ──────────────────
     color *= float3(0.95, 0.97, 1.05);
 
-    // ── 8. Vignette + corner rounding ─────────────────────────────────────────
+    // ── 10. Vignette + corner rounding ────────────────────────────────────────
     float2 vc = w * 2.0 - 1.0;
     float  vig = 1.0 - dot(vc * vc, float2(0.12, 0.18));
     color *= clamp(vig, 0.0, 1.0);
@@ -725,7 +736,7 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     float2 cd = max(float2(0.04) - min(w, 1.0 - w), float2(0.0));
     color *= clamp((0.04 - length(cd)) * 200.0, 0.0, 1.0);
 
-    // ── 9. Gamma encode ───────────────────────────────────────────────────────
+    // ── 11. Gamma encode ──────────────────────────────────────────────────────
     return float4(srgb(clamp(color, 0.0, 1.0)), 1.0);
 }
 
