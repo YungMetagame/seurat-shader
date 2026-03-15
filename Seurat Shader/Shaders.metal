@@ -635,69 +635,79 @@ float4 s_fluid_iridescence(float2 uv, texture2d<float> tex, constant ShaderParam
 // Early-90s VGA CRT: P22 phosphor glow, triangular dot-pitch shadow mask,
 // convergence error (per-channel lateral offset), luminance-adaptive scanlines,
 // 9300K colour temperature.
+// All CRT physics are anchored to VGA Mode 13h (320×200) — independent of the
+// input video resolution. UV is snapped to the emulation grid first (line
+// doubling), then scanlines/mask/blur operate at that fixed logical scale.
 // p0=curve(0.12)  p1=glow(0.80)  p2=scanlines(0.70)  p3=mask(0.55)
 float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float W = float(tex.get_width());
-    float H = float(tex.get_height());
 
-    // ── 1. Barrel distortion ──────────────────────────────────────────────────
+    // VGA Mode 13h emulation resolution — all CRT physics are derived from
+    // these constants, NOT from the input video dimensions.
+    const float emuW = 320.0;
+    const float emuH = 200.0;
+
+    // ── 1. Barrel distortion (screen-space) ───────────────────────────────────
     float2 w = barrel(uv, sp.p0, sp.p0 * 1.25);
     if (oob(w)) return float4(0.0, 0.0, 0.0, 1.0);
 
-    // ── 2. Convergence error — per-channel lateral offset ─────────────────────
-    // VGA electron guns for R and B are slightly mis-converged horizontally.
-    float cx = 1.0 / W;
+    // ── 2. Pre-shader line doubling — snap to VGA pixel grid ──────────────────
+    // Each of the 200 logical rows fills 2 display scanlines (Mode 13h hardware
+    // line doubling). Snapping here means all texture reads use the same colour
+    // for every pair of display rows, exactly as real VGA hardware did.
+    float2 snapUV = (floor(w * float2(emuW, emuH)) + 0.5) / float2(emuW, emuH);
+
+    // ── 3. Convergence error — per-channel lateral offset ─────────────────────
+    // Offset is 1 logical VGA pixel wide, visible at any input resolution.
+    float cx = 1.0 / emuW;
     float3 base;
-    base.r = tex.sample(s, w + float2(-cx, 0.0)).r;
-    base.g = tex.sample(s, w).g;
-    base.b = tex.sample(s, w + float2( cx, 0.0)).b;
+    base.r = tex.sample(s, snapUV + float2(-cx, 0.0)).r;
+    base.g = tex.sample(s, snapUV).g;
+    base.b = tex.sample(s, snapUV + float2( cx, 0.0)).b;
     float3 baseLinear = lin(base);
 
-    // ── 3. P22 phosphor persistence — 7-tap Gaussian, per-channel step ────────
+    // ── 4. P22 phosphor persistence — 7-tap Gaussian, per-channel step ────────
+    // Steps are in emulation-pixel units so blur radius is resolution-invariant.
     // R phosphor decays slowest (widest spread), B fastest (narrowest).
-    // Two separate 7-tap passes: horizontal first, then vertical.
-    // Gaussian kernel for σ≈1.2: weights sum to ~1.0
     float gw[7] = { 0.0625, 0.0938, 0.2188, 0.2500, 0.2188, 0.0938, 0.0625 };
 
-    float sR = 3.0 / W, sG = 2.0 / W, sB = 1.4 / W;  // horizontal per-channel
-    float sV = 1.8 / H;                                 // shared vertical step
+    float sR = 1.2 / emuW,  sG = 0.8 / emuW,  sB = 0.55 / emuW;
+    float sV = 1.2 / emuH;
 
     float3 blurH = float3(0.0);
     for (int i = 0; i < 7; i++) {
         float t = float(i - 3);
-        blurH.r += lin(tex.sample(s, w + float2(t * sR, 0.0)).rgb).r * gw[i];
-        blurH.g += lin(tex.sample(s, w + float2(t * sG, 0.0)).rgb).g * gw[i];
-        blurH.b += lin(tex.sample(s, w + float2(t * sB, 0.0)).rgb).b * gw[i];
+        blurH.r += lin(tex.sample(s, snapUV + float2(t * sR, 0.0)).rgb).r * gw[i];
+        blurH.g += lin(tex.sample(s, snapUV + float2(t * sG, 0.0)).rgb).g * gw[i];
+        blurH.b += lin(tex.sample(s, snapUV + float2(t * sB, 0.0)).rgb).b * gw[i];
     }
     float3 blurV = float3(0.0);
     for (int j = 0; j < 7; j++) {
         float t = float(j - 3);
-        blurV += lin(tex.sample(s, w + float2(0.0, t * sV)).rgb) * gw[j];
+        blurV += lin(tex.sample(s, snapUV + float2(0.0, t * sV)).rgb) * gw[j];
     }
     float3 glowSrc = (blurH + blurV) * 0.5;
 
-    // ── 4. Additive phosphor glow ─────────────────────────────────────────────
-    // Glow is purely additive — bright pixels bleed warm light into dark areas.
-    // Quadratic luma gate: only brighter pixels contribute meaningfully.
+    // ── 5. Additive phosphor glow ─────────────────────────────────────────────
     float luma = dot(glowSrc, float3(0.2126, 0.7152, 0.0722));
-    float3 phosphorTint = float3(1.08, 1.02, 0.82);  // warm P22 phosphor colour
+    float3 phosphorTint = float3(1.08, 1.02, 0.82);
     float3 color = baseLinear + glowSrc * phosphorTint * (luma * luma) * sp.p1;
 
-    // ── 5. Luminance-adaptive scanlines ───────────────────────────────────────
-    // Bright scanlines have a shallower gap (electron beam is wider when hot).
-    float scanPos    = fract(w.y * H);
+    // ── 6. Luminance-adaptive scanlines — 200 lines, resolution-invariant ─────
+    // scanPos is in emulation-line units so exactly 200 gaps appear regardless
+    // of whether the input video is 480p, 1080p, or 4K.
+    float scanPos    = fract(w.y * emuH);
     float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
     float maxDim     = sp.p2;
     float minDim     = sp.p2 * 0.12;
     float scanDepth  = mix(maxDim, minDim, clamp(brightness, 0.0, 1.0));
     color *= 1.0 - scanDepth * (1.0 - sin(scanPos * M_PI_F));
 
-    // ── 6. Shadow mask — triangular dot-pitch (brick pattern) ─────────────────
-    // VGA used a shadow mask. Rows offset by half a triad → brick / triangular
-    // pitch. Each screen pixel's RGB channel is modulated independently.
-    float rowShift  = floor(w.y * H) * 0.5;
-    float maskPhase = fract(w.x * W / 3.0 + rowShift);
+    // ── 7. Shadow mask — triangular dot-pitch, 3 sub-pixels per logical pixel ──
+    // emuW * 3.0 total sub-pixels = exactly 1 RGB triad per VGA pixel, matching
+    // real VGA shadow mask geometry (~0.28 mm pitch on a 14" monitor).
+    float rowShift  = floor(w.y * emuH) * 0.5;
+    float maskPhase = fract(w.x * emuW * 3.0 + rowShift);
     float dark      = 1.0 - sp.p3;
     float3 maskCol  = (maskPhase < 0.333) ? float3(1.0, dark, dark)
                     : (maskPhase < 0.667) ? float3(dark, 1.0, dark)
