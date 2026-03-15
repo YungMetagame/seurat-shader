@@ -31,11 +31,94 @@ let shaderOptions: [ShaderOption] = [
     ShaderOption(id: 18, name: "Yee64",         desc: "C64-style — Gaussian pixel blur + scanline dimming"),
 ]
 
+// ─── Per-shader parameter definitions ────────────────────────────────────────
+
+struct ShaderParam {
+    let name: String
+    let min: Float
+    let max: Float
+    let defaultValue: Float
+}
+
+let shaderParamDefs: [UInt32: [ShaderParam]] = [
+    1: [  // CRT-Lottes
+        ShaderParam(name: "Warp X",    min: 0,    max: 0.15, defaultValue: 0.031),
+        ShaderParam(name: "Warp Y",    min: 0,    max: 0.15, defaultValue: 0.041),
+        ShaderParam(name: "Mask Dark", min: 0,    max: 1.0,  defaultValue: 0.25),
+        ShaderParam(name: "Bloom",     min: 0,    max: 0.3,  defaultValue: 0.08),
+    ],
+    2: [  // CRT-Royale
+        ShaderParam(name: "Warp X",        min: 0,   max: 0.12, defaultValue: 0.025),
+        ShaderParam(name: "Warp Y",        min: 0,   max: 0.12, defaultValue: 0.035),
+        ShaderParam(name: "Mask Dark",     min: 0,   max: 0.5,  defaultValue: 0.08),
+        ShaderParam(name: "Mask Strength", min: 0,   max: 1.0,  defaultValue: 0.7),
+    ],
+    3: [  // Scanlines
+        ShaderParam(name: "Strength", min: 0, max: 0.6, defaultValue: 0.35),
+    ],
+    4: [  // VHS
+        ShaderParam(name: "Chroma Shift", min: 0,     max: 0.02,  defaultValue: 0.003),
+        ShaderParam(name: "Wobble",       min: 0,     max: 0.008, defaultValue: 0.002),
+        ShaderParam(name: "Saturation",   min: 0,     max: 1.0,   defaultValue: 0.85),
+    ],
+    5: [  // EasyMode
+        ShaderParam(name: "Mask Dark", min: 0,   max: 1.0, defaultValue: 0.7),
+        ShaderParam(name: "Gamma",     min: 1.0, max: 3.0, defaultValue: 1.8),
+    ],
+    6: [  // FakeLottes
+        ShaderParam(name: "Warp X", min: 0, max: 0.15, defaultValue: 0.031),
+        ShaderParam(name: "Warp Y", min: 0, max: 0.15, defaultValue: 0.041),
+    ],
+    7: [  // CRT-Pi
+        ShaderParam(name: "Dist X", min: 0, max: 0.3, defaultValue: 0.10),
+        ShaderParam(name: "Dist Y", min: 0, max: 0.3, defaultValue: 0.15),
+    ],
+    8: [  // Caligari
+        ShaderParam(name: "Brightness", min: 0.5, max: 2.5, defaultValue: 1.45),
+        ShaderParam(name: "H-Spread",   min: 0.3, max: 2.0, defaultValue: 0.9),
+        ShaderParam(name: "V-Spread",   min: 0.3, max: 2.0, defaultValue: 0.65),
+    ],
+    9: [  // CRT-Geom
+        ShaderParam(name: "Curvature", min: 0.5, max: 5.0,  defaultValue: 2.0),
+        ShaderParam(name: "Corner",    min: 0.0, max: 0.1,   defaultValue: 0.03),
+        ShaderParam(name: "Dot Mask",  min: 0.0, max: 1.0,   defaultValue: 0.3),
+    ],
+    10: [ // CRT-Mattias
+        ShaderParam(name: "Noise",      min: 0,   max: 0.15, defaultValue: 0.04),
+        ShaderParam(name: "Scan Speed", min: 0.5, max: 10.0, defaultValue: 3.5),
+    ],
+    11: [ // CRT-Frutbunn
+        ShaderParam(name: "Curvature",     min: 0.85, max: 1.05, defaultValue: 0.935),
+        ShaderParam(name: "Scan Strength", min: 0,    max: 0.5,  defaultValue: 0.25),
+    ],
+    13: [ // CRT-Simple
+        ShaderParam(name: "Dist X", min: 0, max: 0.3, defaultValue: 0.12),
+        ShaderParam(name: "Dist Y", min: 0, max: 0.3, defaultValue: 0.18),
+    ],
+    14: [ // CRT-Sines
+        ShaderParam(name: "Chroma Pixels", min: 0,   max: 3.0, defaultValue: 0.5),
+        ShaderParam(name: "Scan Strength", min: 0,   max: 1.5, defaultValue: 1.0),
+    ],
+    15: [ // Gizmo-CRT
+        ShaderParam(name: "Dist X", min: 0, max: 0.3, defaultValue: 0.10),
+        ShaderParam(name: "Dist Y", min: 0, max: 0.3, defaultValue: 0.15),
+    ],
+    16: [ // ZFast-CRT
+        ShaderParam(name: "Warp X",  min: 0, max: 0.1,  defaultValue: 0.03),
+        ShaderParam(name: "Warp Y",  min: 0, max: 0.1,  defaultValue: 0.05),
+        ShaderParam(name: "Flicker", min: 0, max: 0.05, defaultValue: 0.01),
+    ],
+]
+
+// ─── ContentView ─────────────────────────────────────────────────────────────
+
 struct ContentView: View {
     @State private var videoURL: URL? = nil
     @State private var isFileImporterPresented = false
     @State private var selectedShaderID: UInt32 = 0
     @State private var renderer: Renderer? = nil
+    // Per-shader saved param values (keyed by shader ID)
+    @State private var allParamValues: [UInt32: [Float]] = [:]
 
     // Playback state polled from renderer
     @State private var isPlaying = true
@@ -47,6 +130,19 @@ struct ContentView: View {
 
     var selectedShader: ShaderOption {
         shaderOptions.first { $0.id == selectedShaderID } ?? shaderOptions[0]
+    }
+
+    var currentParamDefs: [ShaderParam] {
+        shaderParamDefs[selectedShaderID] ?? []
+    }
+
+    func paramValues(for id: UInt32) -> [Float] {
+        if let saved = allParamValues[id] { return saved }
+        return (shaderParamDefs[id] ?? []).map { $0.defaultValue }
+    }
+
+    func applyParams(shaderID: UInt32) {
+        renderer?.applyExternalParams(shaderIndex: shaderID, paramValues: paramValues(for: shaderID))
     }
 
     var body: some View {
@@ -76,7 +172,7 @@ struct ContentView: View {
             // ── Main area ────────────────────────────────────────────────────
             HStack(spacing: 0) {
 
-                // Shader sidebar
+                // Shader sidebar + parameter panel
                 VStack(alignment: .leading, spacing: 0) {
                     Text("SHADERS")
                         .font(.system(size: 10, weight: .semibold))
@@ -90,9 +186,29 @@ struct ContentView: View {
                             }
                         }
                     }
-                    Spacer()
+
+                    // ── Parameter panel ──────────────────────────────────────
+                    if !currentParamDefs.isEmpty {
+                        Divider()
+                        ParamPanel(
+                            defs: currentParamDefs,
+                            values: paramValues(for: selectedShaderID),
+                            onValueChange: { index, value in
+                                var vals = paramValues(for: selectedShaderID)
+                                vals[index] = value
+                                allParamValues[selectedShaderID] = vals
+                                renderer?.applyExternalParams(shaderIndex: selectedShaderID, paramValues: vals)
+                            },
+                            onReset: {
+                                allParamValues.removeValue(forKey: selectedShaderID)
+                                applyParams(shaderID: selectedShaderID)
+                            }
+                        )
+                    } else {
+                        Spacer()
+                    }
                 }
-                .frame(width: 200)
+                .frame(width: 220)
                 .background(Color(NSColor.controlBackgroundColor))
 
                 Divider()
@@ -174,7 +290,13 @@ struct ContentView: View {
                 }
             }
         }
-        .frame(minWidth: 820, minHeight: 560)
+        .frame(minWidth: 840, minHeight: 560)
+        .onChange(of: selectedShaderID) { newID in
+            applyParams(shaderID: newID)
+        }
+        .onChange(of: renderer) { _ in
+            applyParams(shaderID: selectedShaderID)
+        }
         .onReceive(timer) { _ in
             guard !isScrubbing, let r = renderer else { return }
             isPlaying   = r.isPlaying
@@ -190,6 +312,63 @@ struct ContentView: View {
         return String(format: "%d:%02d", t / 60, t % 60)
     }
 }
+
+// ─── Parameter panel ─────────────────────────────────────────────────────────
+
+struct ParamPanel: View {
+    let defs: [ShaderParam]
+    let values: [Float]
+    let onValueChange: (Int, Float) -> Void
+    let onReset: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("PARAMETERS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Reset") { onReset() }
+                    .font(.system(size: 10))
+                    .buttonStyle(.plain)
+                    .foregroundColor(.accentColor)
+            }
+            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+
+            ForEach(Array(defs.enumerated()), id: \.offset) { i, param in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(param.name)
+                            .font(.system(size: 11))
+                        Spacer()
+                        Text(formatParamValue(values[i]))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(values[i]) },
+                            set: { onValueChange(i, Float($0)) }
+                        ),
+                        in: Double(param.min)...Double(param.max)
+                    )
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
+            }
+
+            Spacer(minLength: 8)
+        }
+    }
+
+    func formatParamValue(_ v: Float) -> String {
+        if abs(v) < 0.01 && v != 0 { return String(format: "%.4f", v) }
+        if abs(v) < 1    { return String(format: "%.3f", v) }
+        return String(format: "%.2f", v)
+    }
+}
+
+// ─── ShaderRow ───────────────────────────────────────────────────────────────
 
 struct ShaderRow: View {
     let shader: ShaderOption
