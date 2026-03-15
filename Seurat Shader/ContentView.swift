@@ -28,7 +28,8 @@ let shaderOptions: [ShaderOption] = [
     ShaderOption(id: 15, name: "Gizmo-CRT",     desc: "Subpixel RGB shift + brightness scanlines + noise"),
     ShaderOption(id: 16, name: "ZFast-CRT",     desc: "Greg Hogan — composite convergence + sine scanlines, fast"),
     ShaderOption(id: 17, name: "Yeetron",       desc: "Per-pixel scanline dimming + RGB channel weighting"),
-    ShaderOption(id: 18, name: "Yee64",         desc: "C64-style — Gaussian pixel blur + scanline dimming"),
+    ShaderOption(id: 18, name: "Yee64",             desc: "C64-style — Gaussian pixel blur + scanline dimming"),
+    ShaderOption(id: 19, name: "Fluid Iridescence", desc: "fBm turbulence distortion + oil-slick YIQ hue shift"),
 ]
 
 // ─── Per-shader parameter definitions ────────────────────────────────────────
@@ -107,6 +108,12 @@ let shaderParamDefs: [UInt32: [ShaderParam]] = [
         ShaderParam(name: "Warp X",  min: 0, max: 0.1,  defaultValue: 0.03),
         ShaderParam(name: "Warp Y",  min: 0, max: 0.1,  defaultValue: 0.05),
         ShaderParam(name: "Flicker", min: 0, max: 0.05, defaultValue: 0.01),
+    ],
+    19: [ // Fluid Iridescence
+        ShaderParam(name: "Speed",       min: 0.05, max: 2.0,  defaultValue: 0.4),
+        ShaderParam(name: "Strength",    min: 0.0,  max: 0.08, defaultValue: 0.025),
+        ShaderParam(name: "Scale",       min: 0.5,  max: 6.0,  defaultValue: 2.5),
+        ShaderParam(name: "Iridescence", min: 0.0,  max: 2.0,  defaultValue: 0.8),
     ],
 ]
 

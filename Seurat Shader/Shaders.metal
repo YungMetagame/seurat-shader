@@ -573,6 +573,64 @@ float4 s_yee64(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     return float4(clamp(scanRGB*final,0.,1.),1);
 }
 
+// ─── 19: Fluid Iridescence ───────────────────────────────────────────────────
+// p0=speed(0.4)  p1=strength(0.025)  p2=scale(2.5)  p3=iridescence(0.8)
+float4 s_fluid_iridescence(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+
+    float speed    = sp.p0;
+    float strength = sp.p1;
+    float scale    = sp.p2;
+    float irid     = sp.p3;
+    float t        = sp.time * speed;
+
+    // fBm UV distortion — 4 octaves of sin/cos interference patterns.
+    // Each octave's query point is offset by the accumulated displacement so
+    // far, giving the characteristic turbulent self-folding quality.
+    float2 p    = uv * scale;
+    float2 disp = float2(0.0);
+    float  amp  = 1.0;
+    float  freq = 1.0;
+
+    for (int i = 0; i < 4; i++) {
+        float2 q = p * freq + float2(t * 0.31, t * 0.17);
+        float2 r;
+        r.x = sin(q.x * 1.7 + sin(q.y * 1.3 + t * 0.23))
+            + sin(q.y * 0.9 + sin(q.x * 2.1 + t * 0.11));
+        r.y = cos(q.x * 1.3 + cos(q.y * 1.7 + t * 0.19))
+            + cos(q.y * 2.0 + cos(q.x * 0.8 + t * 0.27));
+
+        // Feed accumulated displacement back into the next octave's origin.
+        p    += r * 0.4;
+        disp += r * amp;
+        amp  *= 0.5;
+        freq *= 2.1;
+    }
+
+    // Apply displacement to UV and sample.
+    float2 warpedUV = uv + disp * (strength * 0.25);
+    float3 c = tex.sample(s, clamp(warpedUV, 0.0, 1.0)).rgb;
+
+    // Iridescence via YIQ hue rotation, preserving luma (Y channel).
+    float Y = dot(c, float3( 0.299,  0.587,  0.114));
+    float I = dot(c, float3( 0.596, -0.274, -0.321));
+    float Q = dot(c, float3( 0.211, -0.523,  0.311));
+
+    // Rotation angle driven by displacement magnitude and time, scaled by irid.
+    float dispMag = length(disp) * 0.25;   // normalised ~0–1
+    float angle   = (dispMag * M_PI_F + t * 0.5) * irid;
+    float ca = cos(angle), sa = sin(angle);
+    float Ir =  ca * I - sa * Q;
+    float Qr =  sa * I + ca * Q;
+
+    float3 result;
+    result.r = Y + 0.956 * Ir + 0.621 * Qr;
+    result.g = Y - 0.272 * Ir - 0.647 * Qr;
+    result.b = Y - 1.106 * Ir + 1.703 * Qr;
+
+    return float4(clamp(result, 0.0, 1.0), 1.0);
+}
+
 // ─── fragment_main dispatcher ─────────────────────────────────────────────────
 fragment float4 fragment_main(VertexOut in [[stage_in]],
                               texture2d<float> videoTexture [[texture(0)]],
@@ -595,7 +653,8 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
         case 15: return s_gizmo     (in.texCoord, videoTexture, sp);
         case 16: return s_zfast     (in.texCoord, videoTexture, sp);
         case 17: return s_yeetron   (in.texCoord, videoTexture, sp);
-        case 18: return s_yee64     (in.texCoord, videoTexture, sp);
-        default: return s_none      (in.texCoord, videoTexture, sp);
+        case 18: return s_yee64              (in.texCoord, videoTexture, sp);
+        case 19: return s_fluid_iridescence (in.texCoord, videoTexture, sp);
+        default: return s_none              (in.texCoord, videoTexture, sp);
     }
 }
