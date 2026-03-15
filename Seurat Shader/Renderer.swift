@@ -12,8 +12,14 @@ import CoreVideo
 struct ShaderParams {
     var shaderIndex: UInt32 = 0
     var time: Float         = 0.0
-    var pad0: Float         = 0.0
-    var pad1: Float         = 0.0
+    var p0: Float           = 0.0
+    var p1: Float           = 0.0
+    var p2: Float           = 0.0
+    var p3: Float           = 0.0
+    var p4: Float           = 0.0
+    var p5: Float           = 0.0
+    var p6: Float           = 0.0
+    var p7: Float           = 0.0
 }
 
 class Renderer: NSObject, MTKViewDelegate {
@@ -178,6 +184,19 @@ class Renderer: NSObject, MTKViewDelegate {
     func seek(to seconds: Double) {
         let t = CMTime(seconds: seconds, preferredTimescale: 600)
         player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    // Apply shader index + per-shader param values from SwiftUI (preserves time)
+    func applyExternalParams(shaderIndex: UInt32, paramValues: [Float]) {
+        shaderParams.shaderIndex = shaderIndex
+        shaderParams.p0 = paramValues.count > 0 ? paramValues[0] : 0
+        shaderParams.p1 = paramValues.count > 1 ? paramValues[1] : 0
+        shaderParams.p2 = paramValues.count > 2 ? paramValues[2] : 0
+        shaderParams.p3 = paramValues.count > 3 ? paramValues[3] : 0
+        shaderParams.p4 = paramValues.count > 4 ? paramValues[4] : 0
+        shaderParams.p5 = paramValues.count > 5 ? paramValues[5] : 0
+        shaderParams.p6 = paramValues.count > 6 ? paramValues[6] : 0
+        shaderParams.p7 = paramValues.count > 7 ? paramValues[7] : 0
     }
 
     // MARK: - Texture

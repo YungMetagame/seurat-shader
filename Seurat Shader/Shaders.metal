@@ -18,8 +18,7 @@ struct VertexOut {
 struct ShaderParams {
     uint  shaderIndex;
     float time;
-    float pad0;
-    float pad1;
+    float p0, p1, p2, p3, p4, p5, p6, p7;
 };
 
 vertex VertexOut vertex_main(uint vertexID [[vertex_id]],
@@ -47,15 +46,16 @@ float3 lin(float3 c)  { return pow(clamp(c,0.,1.), float3(2.2)); }
 float3 srgb(float3 c) { return pow(clamp(c,0.,1.), float3(1.0/2.2)); }
 
 // ─── 0: Passthrough ──────────────────────────────────────────────────────────
-float4 s_none(float2 uv, texture2d<float> tex) {
+float4 s_none(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     return tex.sample(s, uv);
 }
 
 // ─── 1: CRT-Lottes ───────────────────────────────────────────────────────────
-float4 s_lottes(float2 uv, texture2d<float> tex) {
+// p0=warpX(0.031)  p1=warpY(0.041)  p2=maskDark(0.25)  p3=bloom(0.08)
+float4 s_lottes(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float2 w = barrel(uv, 0.031, 0.041);
+    float2 w = barrel(uv, sp.p0, sp.p1);
     if (oob(w)) return float4(0,0,0,1);
     float3 c = lin(tex.sample(s, w).rgb);
     // scanlines
@@ -63,27 +63,30 @@ float4 s_lottes(float2 uv, texture2d<float> tex) {
     c *= 0.72 + 0.28 * sc * sc;
     // RGB aperture mask
     float mx = fract(w.x * float(tex.get_width()) / 3.0);
-    float3 mask = (mx < 0.333) ? float3(1,.25,.25) : (mx < 0.666) ? float3(.25,1,.25) : float3(.25,.25,1);
+    float md = sp.p2;
+    float3 mask = (mx < 0.333) ? float3(1,md,md) : (mx < 0.666) ? float3(md,1,md) : float3(md,md,1);
     c *= mix(float3(1), mask, 0.5);
     // bloom
     float step = 1.5 / float(tex.get_width());
     float3 bl = (tex.sample(s,w+float2(-step,0)).rgb + tex.sample(s,w).rgb + tex.sample(s,w+float2(step,0)).rgb)/3.0;
-    c += lin(bl) * 0.08;
+    c += lin(bl) * sp.p3;
     return float4(srgb(c), 1);
 }
 
 // ─── 2: CRT-Royale (Kurozumi) ────────────────────────────────────────────────
-float4 s_royale(float2 uv, texture2d<float> tex) {
+// p0=warpX(0.025)  p1=warpY(0.035)  p2=maskDark(0.08)  p3=maskStrength(0.7)
+float4 s_royale(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float2 w = barrel(uv, 0.025, 0.035);
+    float2 w = barrel(uv, sp.p0, sp.p1);
     if (oob(w)) return float4(0,0,0,1);
     float3 c = lin(tex.sample(s, w).rgb);
     float sc = sin(w.y * float(tex.get_height()) * M_PI_F);
     c *= 0.6 + 0.4 * sc * sc;
     // Trinitron grille
     float mx = fract(w.x * float(tex.get_width()) / 3.0);
-    float3 mask = (mx < 0.333) ? float3(1,.08,.08) : (mx < 0.666) ? float3(.08,1,.08) : float3(.08,.08,1);
-    c *= mix(float3(1), mask, 0.7);
+    float md = sp.p2;
+    float3 mask = (mx < 0.333) ? float3(1,md,md) : (mx < 0.666) ? float3(md,1,md) : float3(md,md,1);
+    c *= mix(float3(1), mask, sp.p3);
     // halation
     float st = 2.0/float(tex.get_width());
     float3 gl = (tex.sample(s,w+float2(-st,0)).rgb + tex.sample(s,w).rgb + tex.sample(s,w+float2(st,0)).rgb)/3.0;
@@ -95,29 +98,32 @@ float4 s_royale(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 3: Scanlines ────────────────────────────────────────────────────────────
-float4 s_scanlines(float2 uv, texture2d<float> tex) {
+// p0=strength(0.35) — 0=flat, 0.6=very dark scanlines
+float4 s_scanlines(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 c = tex.sample(s, uv).rgb;
     float sc = sin(uv.y * float(tex.get_height()) * M_PI_F);
-    return float4(c * (0.65 + 0.35 * sc * sc), 1);
+    return float4(c * ((1.0 - sp.p0) + sp.p0 * sc * sc), 1);
 }
 
 // ─── 4: VHS/Composite ────────────────────────────────────────────────────────
-float4 s_vhs(float2 uv, texture2d<float> tex, float time) {
+// p0=chromaShift(0.003)  p1=wobble(0.002)  p2=saturation(0.85)
+float4 s_vhs(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float wb = sin(uv.y * 80.0 + time * 4.0) * 0.002;
-    float r = tex.sample(s, uv + float2(wb+0.003, 0)).r;
-    float g = tex.sample(s, uv + float2(wb,       0)).g;
-    float b = tex.sample(s, uv + float2(wb-0.003, 0)).b;
+    float wb = sin(uv.y * 80.0 + sp.time * 4.0) * sp.p1;
+    float r = tex.sample(s, uv + float2(wb + sp.p0, 0)).r;
+    float g = tex.sample(s, uv + float2(wb,         0)).g;
+    float b = tex.sample(s, uv + float2(wb - sp.p0, 0)).b;
     float3 c = float3(r,g,b);
     float sc = sin(uv.y * float(tex.get_height()) * M_PI_F);
     c *= 0.75 + 0.25 * sc * sc;
     float luma = dot(c, float3(0.299,0.587,0.114));
-    return float4(mix(float3(luma), c, 0.85), 1);
+    return float4(mix(float3(luma), c, sp.p2), 1);
 }
 
 // ─── 5: EasyMode (brightness-adaptive scanlines + staggered RGB mask) ─────────
-float4 s_easymode(float2 uv, texture2d<float> tex) {
+// p0=maskDark(0.7)  p1=gamma(1.8)
+float4 s_easymode(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()); float H = float(tex.get_height());
     float2 pix = uv * float2(W, H) - 0.5;
@@ -135,19 +141,20 @@ float4 s_easymode(float2 uv, texture2d<float> tex) {
     float beam   = clamp(bright * 1.5, 1.5, 1.5);
     float sw     = 1.0 - pow(cos(uv.y * 2.0 * M_PI_F * H) * 0.5 + 0.5, beam);
     float3 c2 = c; c *= sw; c = mix(c, c2, clamp(bright, 0.35, 0.65));
-    float mask = 0.7;
+    float mask = sp.p0;
     float2 mf = floor(uv * float2(W,H));
     int dn = int(fmod(mf.x, 3.0));
     float3 mw = (dn==0) ? float3(1,mask,mask) : (dn==1) ? float3(mask,1,mask) : float3(mask,mask,1);
     c *= mw;
-    return float4(pow(clamp(c*1.2, 0., 1.), float3(1.0/1.8)), 1);
+    return float4(pow(clamp(c*1.2, 0., 1.), float3(1.0/sp.p1)), 1);
 }
 
 // ─── 6: FakeLottes (sine scanlines + 4-mode shadow mask + curvature) ─────────
-float4 s_fakelottes(float2 uv, texture2d<float> tex) {
+// p0=warpX(0.031)  p1=warpY(0.041)
+float4 s_fakelottes(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()); float H = float(tex.get_height());
-    float2 w = barrel(uv, 0.031, 0.041);
+    float2 w = barrel(uv, sp.p0, sp.p1);
     if (oob(w)) return float4(0,0,0,1);
     float3 c = pow(tex.sample(s, w).rgb, float3(2.5));
     // sine scanlines
@@ -164,13 +171,14 @@ float4 s_fakelottes(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 7: CRT-Pi (multisampled scanlines + trinitron mask + barrel) ────────────
-float4 s_crtpi(float2 uv, texture2d<float> tex) {
+// p0=distX(0.10)  p1=distY(0.15)
+float4 s_crtpi(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()); float H = float(tex.get_height());
     // Distort
     float2 co = uv - 0.5;
     float rsq = co.x*co.x + co.y*co.y;
-    float2 dist = float2(0.10, 0.15);
+    float2 dist = float2(sp.p0, sp.p1);
     co += co * (dist * rsq);
     co *= 1.0 - 0.23 * dist;
     if (abs(co.x) >= 0.5 || abs(co.y) >= 0.5) return float4(0,0,0,1);
@@ -195,7 +203,8 @@ float4 s_crtpi(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 8: Caligari (phosphor spot bleeding — soft pixel glow) ──────────────────
-float4 s_caligari(float2 uv, texture2d<float> tex) {
+// p0=brightness(1.45)  p1=hSpread(0.9)  p2=vSpread(0.65)
+float4 s_caligari(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::nearest, address::clamp_to_edge);
     float W = float(tex.get_width()); float H = float(tex.get_height());
     float2 coords = uv * float2(W, H);
@@ -203,42 +212,45 @@ float4 s_caligari(float2 uv, texture2d<float> tex) {
     float2 tc = pc / float2(W, H);
     float4 c = pow(tex.sample(s, tc), float4(2.4));
     float dx = coords.x - pc.x;
+    float hs = max(sp.p1, 0.01);
     // horizontal phosphor spot
-    float hw0 = dx / 0.9; hw0 = clamp(hw0, -1., 1.); hw0 = 1.-hw0*hw0; hw0=hw0*hw0;
+    float hw0 = dx / hs; hw0 = clamp(hw0, -1., 1.); hw0 = 1.-hw0*hw0; hw0=hw0*hw0;
     c *= hw0;
     float2 nb = dx > 0.0 ? float2(1.0/W, 0) : float2(-1.0/W, 0);
     float dx2 = dx > 0.0 ? 1.0-dx : 1.0+dx;
-    float hw1 = dx2 / 0.9; hw1 = clamp(hw1,-1.,1.); hw1=1.-hw1*hw1; hw1=hw1*hw1;
+    float hw1 = dx2 / hs; hw1 = clamp(hw1,-1.,1.); hw1=1.-hw1*hw1; hw1=hw1*hw1;
     float4 cn = pow(tex.sample(s, tc+nb), float4(2.4));
     c += cn * hw1;
     // vertical phosphor spot
     float dy = coords.y - pc.y;
-    float vw0 = dy / 0.65; vw0 = clamp(vw0,-1.,1.); vw0=1.-vw0*vw0; vw0=vw0*vw0;
+    float vs = max(sp.p2, 0.01);
+    float vw0 = dy / vs; vw0 = clamp(vw0,-1.,1.); vw0=1.-vw0*vw0; vw0=vw0*vw0;
     c *= vw0;
     float2 nv = dy > 0.0 ? float2(0, 1.0/H) : float2(0, -1.0/H);
     float dy2 = dy > 0.0 ? 1.0-dy : 1.0+dy;
-    float vw1 = dy2 / 0.65; vw1=clamp(vw1,-1.,1.); vw1=1.-vw1*vw1; vw1=vw1*vw1;
+    float vw1 = dy2 / vs; vw1=clamp(vw1,-1.,1.); vw1=1.-vw1*vw1; vw1=vw1*vw1;
     float4 cv = pow(tex.sample(s, tc+nv), float4(2.4));
     c += cv * float4(vw1*hw0);
     float4 cnv = pow(tex.sample(s, tc+nb+nv), float4(2.4));
     c += cnv * float4(vw1*hw1);
-    c *= 1.45;
+    c *= sp.p0;
     return clamp(pow(c, float4(1.0/2.2)), 0., 1.);
 }
 
 // ─── 9: CRT-Geom (full spherical curvature + corner rounding + Lanczos) ──────
-float4 s_geom(float2 uv, texture2d<float> tex) {
+// p0=curvature/R(2.0)  p1=corner(0.03)  p2=maskAmt(0.3)
+float4 s_geom(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()); float H = float(tex.get_height());
     // Spherical distortion (simplified from cgwg's crt-geom)
-    float2 p = uv * 2.0 - 1.0;
-    float d = 1.5, R = 2.0;
+    float2 uvc = uv * 2.0 - 1.0;
+    float d = 1.5, R = sp.p0;
     float2 sa = float2(0.0), ca = float2(1.0);
-    float A = dot(p,p) + d*d;
-    float B = 2.0*(R*(dot(p,sa)-d*ca.x*ca.y)-d*d);
+    float A = dot(uvc,uvc) + d*d;
+    float B = 2.0*(R*(dot(uvc,sa)-d*ca.x*ca.y)-d*d);
     float C = d*d + 2.0*R*d*ca.x*ca.y;
     float t = (-B - sqrt(max(B*B-4.0*A*C,0.0))) / (2.0*A);
-    float2 pt = (t*p - (-R)*sa) / R;
+    float2 pt = (t*uvc - (-R)*sa) / R;
     float2 poc = pt / ca;
     float2 tang = sa/ca;
     float A2 = dot(tang,tang)+1.0, B2 = -2.0*dot(poc,tang), C2 = dot(poc,poc)-1.0;
@@ -251,8 +263,9 @@ float4 s_geom(float2 uv, texture2d<float> tex) {
     if (oob(xy)) return float4(0,0,0,1);
     // Corner rounding
     float2 cco = min(xy, 1.0-xy) * float2(1.0, 0.75);
-    float2 cd = max(float2(0.03) - cco, float2(0));
-    float corner = clamp((0.03 - length(cd)) * 1000.0, 0.0, 1.0);
+    float cr = max(sp.p1, 0.001);
+    float2 cd = max(float2(cr) - cco, float2(0));
+    float corner = clamp((cr - length(cd)) * 1000.0, 0.0, 1.0);
     // Lanczos2 horizontal filter
     float2 one = 1.0 / float2(W, H);
     float2 ratio = xy * float2(W, H);
@@ -280,12 +293,13 @@ float4 s_geom(float2 uv, texture2d<float> tex) {
     float2 mp = fract(uv * float2(W,H) / float2(W,H) * float2(W,H));
     float fx = fract(mp.x * 0.333333);
     float3 dm = (fx<0.333)?float3(1,.3,.3):(fx<0.666)?float3(.3,1,.3):float3(.3,.3,1);
-    rgb *= mix(float3(1), dm, 0.3);
+    rgb *= mix(float3(1), dm, sp.p2);
     return float4(pow(rgb, float3(1.0/2.2)), 1);
 }
 
 // ─── 10: CRT-Mattias (Gaussian bloom + crawling scanlines + noise + curvature) ─
-float4 s_mattias(float2 uv, texture2d<float> tex, float time) {
+// p0=noiseAmt(0.04)  p1=scanSpeed(3.5)
+float4 s_mattias(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     // Curve
@@ -308,22 +322,23 @@ float4 s_mattias(float2 uv, texture2d<float> tex, float time) {
     float vig = pow(16.0*w.x*w.y*(1-w.x)*(1-w.y),0.3);
     col *= vig;
     // Crawling scanlines
-    float scan = clamp(0.35+0.15*sin(3.5*time+uv.y*H*1.5),0.,1.);
+    float scan = clamp(0.35+0.15*sin(sp.p1*sp.time+uv.y*H*1.5),0.,1.);
     col *= pow(scan,0.9);
     // Noise
-    float sn = fract(sin(dot(uv+0.0001*time,float2(12.9898,78.233)))*43758.5453);
-    col -= sn*0.04;
+    float sn = fract(sin(dot(uv+0.0001*sp.time,float2(12.9898,78.233)))*43758.5453);
+    col -= sn*sp.p0;
     col = pow(clamp(col,0.,1.),float3(0.45));
     return float4(col,1);
 }
 
 // ─── 11: CRT-Frutbunn (Gaussian blur + vignette + cos scanlines + curvature) ──
-float4 s_frutbunn(float2 uv, texture2d<float> tex) {
+// p0=curvature(0.935)  p1=scanStrength(0.25)
+float4 s_frutbunn(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     float2 st = uv - 0.5;
     float d = length(st*0.5*st*0.5);
-    float2 w = st*(d+0.935);
+    float2 w = st*(d+sp.p0);
     if (abs(w.x)>0.5||abs(w.y)>0.5) return float4(0,0,0,1);
     w += 0.5;
     // 3x3 Gaussian
@@ -342,7 +357,7 @@ float4 s_frutbunn(float2 uv, texture2d<float> tex) {
     col *= l;
     // Scanlines
     float sc = 2.5 + H * (1.0/H);
-    float j = cos((w.y-0.5)*H*sc)*0.25;
+    float j = cos((w.y-0.5)*H*sc)*sp.p1;
     col = col - col*j;
     // Border
     float m = min(1.0, 200.0*max(0.0, 1.0-2.0*max(abs(w.x-0.5),abs(w.y-0.5))));
@@ -351,7 +366,7 @@ float4 s_frutbunn(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 12: CRT-cgwg-fast (Lanczos filter + beam width + magenta/green mask) ─────
-float4 s_cgwg(float2 uv, texture2d<float> tex) {
+float4 s_cgwg(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     float2 ratio = uv * float2(W,H);
@@ -383,14 +398,15 @@ float4 s_cgwg(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 13: CRT-Simple (gaussian beam scanlines + dot mask + distortion) ─────────
-float4 s_simple(float2 uv, texture2d<float> tex) {
+// p0=distX(0.12)  p1=distY(0.18)
+float4 s_simple(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     // Distortion
     float2 co = uv - 0.5;
     float rsq = co.x*co.x + co.y*co.y;
-    co += co*(float2(0.12,0.18)*rsq);
-    co *= 1.0-0.23*float2(0.12,0.18);
+    co += co*(float2(sp.p0,sp.p1)*rsq);
+    co *= 1.0-0.23*float2(sp.p0,sp.p1);
     if (abs(co.x)>=0.5||abs(co.y)>=0.5) return float4(0,0,0,1);
     float2 w = co + 0.5;
     float2 rs = w*float2(W,H) - 0.5;
@@ -404,12 +420,12 @@ float4 s_simple(float2 uv, texture2d<float> tex) {
     float4 sw2 = 1.4*exp(-pow(float4((1-uvr.y)/0.3)*rsqrt(0.5*wid2),wid2))/(0.6+0.2*wid2);
     float3 res = (c0*sw1+c1*sw2).rgb;
     float dm = mix(0.7, 1.0, fract(uv.x*W*0.5));
-    res *= dm;
     return float4(pow(clamp(res,0.,1.),float3(1.0/2.2)),1);
 }
 
 // ─── 14: CRT-Sines (sharp-bilinear + sine scanlines + chroma shift + mask) ────
-float4 s_sines(float2 uv, texture2d<float> tex, float time) {
+// p0=chromaPixels(0.5)  p1=scanStrength(1.0)
+float4 s_sines(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     // Sharp bilinear
@@ -418,7 +434,7 @@ float4 s_sines(float2 uv, texture2d<float> tex, float time) {
     float2 fr = fract(texel)-0.5;
     float2 tc2 = (tf + 0.5 + clamp(fr/fwidth(fr)*0.5,-0.5,0.5))/float2(W,H);
     // Chroma ghost
-    float px = 0.5/W;
+    float px = sp.p0/W;
     float3 col = float3(
         tex.sample(s,tc2+float2(px,0)).r,
         tex.sample(s,tc2).g,
@@ -426,7 +442,7 @@ float4 s_sines(float2 uv, texture2d<float> tex, float time) {
     col = pow(col,float3(2.4));
     // Scanlines
     float lum = dot(col,float3(0.3,0.6,0.1));
-    float scl = mix(0.75,0.4,lum);
+    float scl = mix(0.75,0.4,lum) * sp.p1;
     col *= scl*sin(fract(uv.y*H)*M_PI_F)+(1.0-scl);
     // Mask
     float msk = mix(0.3,0.6,lum);
@@ -438,14 +454,15 @@ float4 s_sines(float2 uv, texture2d<float> tex, float time) {
 }
 
 // ─── 15: Gizmo-CRT (subpixel RGB shift + brightness scanlines + noise) ────────
-float4 s_gizmo(float2 uv, texture2d<float> tex, float time) {
+// p0=distX(0.10)  p1=distY(0.15)
+float4 s_gizmo(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     // Barrel distortion
     float2 co = uv - 0.5;
     float rsq = co.x*co.x+co.y*co.y;
-    co += co*(float2(0.10,0.15)*rsq);
-    co *= 1.0-0.23*float2(0.10,0.15);
+    co += co*(float2(sp.p0,sp.p1)*rsq);
+    co *= 1.0-0.23*float2(sp.p0,sp.p1);
     if (abs(co.x)>=0.5||abs(co.y)>=0.5) return float4(0,0,0,1);
     float2 w = co+0.5;
     // Subpixel RGB horizontal shift (aperture grille simulation)
@@ -462,19 +479,20 @@ float4 s_gizmo(float2 uv, texture2d<float> tex, float time) {
     col -= dim;
     // Gold noise
     float PHI = 1.61803398875;
-    float sn = fract(tan(distance(uv*PHI,uv)*fract(time*0.025))*uv.x);
+    float sn = fract(tan(distance(uv*PHI,uv)*fract(sp.time*0.025))*uv.x);
     col = clamp(col + sn/32.0 - 1.0/64.0, 0., 1.);
     return float4(col,1);
 }
 
-// ─── 16: ZFast-CRT (composite convergence + sine scanlines + mask + curvature) 
-float4 s_zfast(float2 uv, texture2d<float> tex, float time) {
+// ─── 16: ZFast-CRT (composite convergence + sine scanlines + mask + curvature)
+// p0=warpX(0.03)  p1=warpY(0.05)  p2=flicker(0.01)
+float4 s_zfast(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     // Warp
-    float2 p = uv*2.0-1.0;
-    p *= float2(1.0+(p.y*p.y)*0.03, 1.0+(p.x*p.x)*0.05);
-    float2 w = p*0.5+0.5;
+    float2 uvc = uv*2.0-1.0;
+    uvc *= float2(1.0+(uvc.y*uvc.y)*sp.p0, 1.0+(uvc.x*uvc.x)*sp.p1);
+    float2 w = uvc*0.5+0.5;
     float2 corn = min(w,1.0-w);
     if (corn.x<0.00001||corn.y<0.0) return float4(0,0,0,1);
     // Snap to scanline
@@ -482,7 +500,7 @@ float4 s_zfast(float2 uv, texture2d<float> tex, float time) {
     float cent = floor(OGL2Pos)+0.5;
     float yc = mix(w.y, cent/H, 0.6);
     float bx = 0.85/(W*2.0), by = 0.10/(H*2.0);
-    float flick = sin(time*2.0)*0.01;
+    float flick = sin(sp.time*2.0)*sp.p2;
     float3 c1 = flick + tex.sample(s,float2(w.x+bx,yc-by)).rgb;
     float3 c2 = 0.5*tex.sample(s,float2(w.x,yc)).rgb;
     float3 c3 = flick + tex.sample(s,float2(w.x-bx,yc+by)).rgb;
@@ -503,7 +521,7 @@ float4 s_zfast(float2 uv, texture2d<float> tex, float time) {
 }
 
 // ─── 17: Yeetron (per-pixel scanline dimming + RGB channel weighting) ──────────
-float4 s_yeetron(float2 uv, texture2d<float> tex) {
+float4 s_yeetron(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     float2 pixPos = floor(uv*float2(W,H));
@@ -523,7 +541,7 @@ float4 s_yeetron(float2 uv, texture2d<float> tex) {
 }
 
 // ─── 18: Yee64 (Gaussian pixel blur + scanline dimming + RGB weighting) ───────
-float4 s_yee64(float2 uv, texture2d<float> tex) {
+float4 s_yee64(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float W = float(tex.get_width()), H = float(tex.get_height());
     float2 size2 = uv*float2(W,H);
@@ -558,26 +576,26 @@ float4 s_yee64(float2 uv, texture2d<float> tex) {
 // ─── fragment_main dispatcher ─────────────────────────────────────────────────
 fragment float4 fragment_main(VertexOut in [[stage_in]],
                               texture2d<float> videoTexture [[texture(0)]],
-                              constant ShaderParams& p [[buffer(1)]]) {
-    switch (p.shaderIndex) {
-        case 1:  return s_lottes    (in.texCoord, videoTexture);
-        case 2:  return s_royale    (in.texCoord, videoTexture);
-        case 3:  return s_scanlines (in.texCoord, videoTexture);
-        case 4:  return s_vhs       (in.texCoord, videoTexture, p.time);
-        case 5:  return s_easymode  (in.texCoord, videoTexture);
-        case 6:  return s_fakelottes(in.texCoord, videoTexture);
-        case 7:  return s_crtpi     (in.texCoord, videoTexture);
-        case 8:  return s_caligari  (in.texCoord, videoTexture);
-        case 9:  return s_geom      (in.texCoord, videoTexture);
-        case 10: return s_mattias   (in.texCoord, videoTexture, p.time);
-        case 11: return s_frutbunn  (in.texCoord, videoTexture);
-        case 12: return s_cgwg      (in.texCoord, videoTexture);
-        case 13: return s_simple    (in.texCoord, videoTexture);
-        case 14: return s_sines     (in.texCoord, videoTexture, p.time);
-        case 15: return s_gizmo     (in.texCoord, videoTexture, p.time);
-        case 16: return s_zfast     (in.texCoord, videoTexture, p.time);
-        case 17: return s_yeetron   (in.texCoord, videoTexture);
-        case 18: return s_yee64     (in.texCoord, videoTexture);
-        default: return s_none      (in.texCoord, videoTexture);
+                              constant ShaderParams& sp [[buffer(1)]]) {
+    switch (sp.shaderIndex) {
+        case 1:  return s_lottes    (in.texCoord, videoTexture, sp);
+        case 2:  return s_royale    (in.texCoord, videoTexture, sp);
+        case 3:  return s_scanlines (in.texCoord, videoTexture, sp);
+        case 4:  return s_vhs       (in.texCoord, videoTexture, sp);
+        case 5:  return s_easymode  (in.texCoord, videoTexture, sp);
+        case 6:  return s_fakelottes(in.texCoord, videoTexture, sp);
+        case 7:  return s_crtpi     (in.texCoord, videoTexture, sp);
+        case 8:  return s_caligari  (in.texCoord, videoTexture, sp);
+        case 9:  return s_geom      (in.texCoord, videoTexture, sp);
+        case 10: return s_mattias   (in.texCoord, videoTexture, sp);
+        case 11: return s_frutbunn  (in.texCoord, videoTexture, sp);
+        case 12: return s_cgwg      (in.texCoord, videoTexture, sp);
+        case 13: return s_simple    (in.texCoord, videoTexture, sp);
+        case 14: return s_sines     (in.texCoord, videoTexture, sp);
+        case 15: return s_gizmo     (in.texCoord, videoTexture, sp);
+        case 16: return s_zfast     (in.texCoord, videoTexture, sp);
+        case 17: return s_yeetron   (in.texCoord, videoTexture, sp);
+        case 18: return s_yee64     (in.texCoord, videoTexture, sp);
+        default: return s_none      (in.texCoord, videoTexture, sp);
     }
 }
