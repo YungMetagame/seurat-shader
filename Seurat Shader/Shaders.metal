@@ -638,31 +638,40 @@ float4 s_fluid_iridescence(float2 uv, texture2d<float> tex, constant ShaderParam
 // p0=curve(0.12)  p1=glow(0.80)  p2=scanlines(0.70)  p3=mask(0.55)
 float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float W = float(tex.get_width());
-    float H = float(tex.get_height());
+
+    // Anchor all CRT physics to the VGA Mode 13h emulation resolution (320×200).
+    // Input video resolution is irrelevant — a 4K source and a 480p source must
+    // produce identical phosphor structure at the same display size.
+    const float emuW = 320.0, emuH = 200.0;
 
     // ── 1. Barrel distortion ──────────────────────────────────────────────────
     float2 w = barrel(uv, sp.p0, sp.p0 * 1.25);
     if (oob(w)) return float4(0.0, 0.0, 0.0, 1.0);
 
-    // ── 2. Convergence error — per-channel lateral offset ─────────────────────
-    // VGA electron guns for R and B are slightly mis-converged horizontally.
-    float cx = 1.0 / W;
+    // ── 2. Snap to VGA grid — chunky 320×200 logical pixels ──────────────────
+    // Quantise the sample UV to the nearest VGA pixel centre so all CRT effects
+    // operate on discrete logical pixels, not sub-pixels of the source video.
+    float2 wSnap = (floor(w * float2(emuW, emuH)) + 0.5) / float2(emuW, emuH);
+
+    // ── 3. Convergence error — per-channel lateral offset (±1 VGA pixel) ──────
+    float cx = 1.0 / emuW;
     float3 base;
-    base.r = tex.sample(s, w + float2(-cx, 0.0)).r;
-    base.g = tex.sample(s, w).g;
-    base.b = tex.sample(s, w + float2( cx, 0.0)).b;
+    base.r = tex.sample(s, wSnap + float2(-cx, 0.0)).r;
+    base.g = tex.sample(s, wSnap).g;
+    base.b = tex.sample(s, wSnap + float2( cx, 0.0)).b;
     float3 baseLinear = lin(base);
 
-    // ── 3. P22 phosphor persistence — 7-tap Gaussian, per-channel step ────────
-    // R phosphor decays slowest (widest spread), B fastest (narrowest).
-    // Two separate 7-tap passes: horizontal first, then vertical.
-    // Gaussian kernel for σ≈1.2: weights sum to ~1.0
+    // ── 4. P22 phosphor persistence — 7-tap Gaussian in VGA-pixel units ───────
+    // Spread is expressed as a fraction of one VGA pixel so it scales correctly
+    // regardless of source resolution.  R decays slowest, B fastest.
     float gw[7] = { 0.0625, 0.0938, 0.2188, 0.2500, 0.2188, 0.0938, 0.0625 };
 
-    float sR = 3.0 / W, sG = 2.0 / W, sB = 1.4 / W;  // horizontal per-channel
-    float sV = 1.8 / H;                                 // shared vertical step
+    float sR = 1.5 / emuW, sG = 1.0 / emuW, sB = 0.7 / emuW;
+    float sV = 1.0 / emuH;
 
+    // Glow taps sample from the full-resolution source (w, not wSnap) so the
+    // blur oversamples relative to the VGA grid — giving smooth phosphor halation
+    // even though the visible pixel is hard-edged.
     float3 blurH = float3(0.0);
     for (int i = 0; i < 7; i++) {
         float t = float(i - 3);
@@ -677,27 +686,25 @@ float4 s_vga256(float2 uv, texture2d<float> tex, constant ShaderParams& sp) {
     }
     float3 glowSrc = (blurH + blurV) * 0.5;
 
-    // ── 4. Additive phosphor glow ─────────────────────────────────────────────
-    // Glow is purely additive — bright pixels bleed warm light into dark areas.
-    // Quadratic luma gate: only brighter pixels contribute meaningfully.
+    // ── 5. Additive phosphor glow ─────────────────────────────────────────────
     float luma = dot(glowSrc, float3(0.2126, 0.7152, 0.0722));
-    float3 phosphorTint = float3(1.08, 1.02, 0.82);  // warm P22 phosphor colour
+    float3 phosphorTint = float3(1.08, 1.02, 0.82);
     float3 color = baseLinear + glowSrc * phosphorTint * (luma * luma) * sp.p1;
 
-    // ── 5. Luminance-adaptive scanlines ───────────────────────────────────────
-    // Bright scanlines have a shallower gap (electron beam is wider when hot).
-    float scanPos    = fract(w.y * H);
+    // ── 6. Luminance-adaptive scanlines — 200 lines, not input-video lines ────
+    float scanPos    = fract(w.y * emuH);
     float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
     float maxDim     = sp.p2;
     float minDim     = sp.p2 * 0.12;
     float scanDepth  = mix(maxDim, minDim, clamp(brightness, 0.0, 1.0));
     color *= 1.0 - scanDepth * (1.0 - sin(scanPos * M_PI_F));
 
-    // ── 6. Shadow mask — triangular dot-pitch (brick pattern) ─────────────────
-    // VGA used a shadow mask. Rows offset by half a triad → brick / triangular
-    // pitch. Each screen pixel's RGB channel is modulated independently.
-    float rowShift  = floor(w.y * H) * 0.5;
-    float maskPhase = fract(w.x * W / 3.0 + rowShift);
+    // ── 7. Shadow mask — one R/G/B triad per VGA pixel (brick pattern) ────────
+    // fract(w.x * emuW) = position 0→1 within the current VGA pixel column.
+    // Thirds divide each pixel into its R, G, B phosphor stripe.
+    // Row offset of 0.5 pixels staggers alternate rows → triangular dot pitch.
+    float rowShift  = floor(w.y * emuH) * 0.5;
+    float maskPhase = fract(w.x * emuW + rowShift);
     float dark      = 1.0 - sp.p3;
     float3 maskCol  = (maskPhase < 0.333) ? float3(1.0, dark, dark)
                     : (maskPhase < 0.667) ? float3(dark, 1.0, dark)

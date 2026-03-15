@@ -134,6 +134,13 @@ struct ContentView: View {
     // Per-shader saved param values (keyed by shader ID)
     @State private var allParamValues: [UInt32: [Float]] = [:]
 
+    // Zoom / pan for phosphor inspection
+    @State private var zoomScale: CGFloat = 1.0
+    @State private var lastZoomScale: CGFloat = 1.0
+    @State private var panOffset: CGSize = .zero
+    @State private var lastPanOffset: CGSize = .zero
+    @GestureState private var liveZoom: CGFloat = 1.0
+
     // Playback state polled from renderer
     @State private var isPlaying = true
     @State private var currentTime: Double = 0
@@ -236,6 +243,36 @@ struct ContentView: View {
                             MetalVideoView(videoURL: url,
                                            shaderIndex: selectedShaderID,
                                            renderer: $renderer)
+                                .scaleEffect(zoomScale * liveZoom, anchor: .center)
+                                .offset(panOffset)
+                                // Pinch to zoom (trackpad two-finger pinch)
+                                .gesture(
+                                    MagnificationGesture()
+                                        .updating($liveZoom) { val, state, _ in state = val }
+                                        .onEnded { val in
+                                            zoomScale = max(1.0, min(20.0, lastZoomScale * val))
+                                            lastZoomScale = zoomScale
+                                        }
+                                )
+                                // Drag to pan when zoomed in
+                                .gesture(
+                                    DragGesture()
+                                        .onChanged { val in
+                                            guard zoomScale > 1.0 else { return }
+                                            panOffset = CGSize(
+                                                width:  lastPanOffset.width  + val.translation.width,
+                                                height: lastPanOffset.height + val.translation.height
+                                            )
+                                        }
+                                        .onEnded { _ in lastPanOffset = panOffset }
+                                )
+                                // Double-click to reset
+                                .onTapGesture(count: 2) {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        zoomScale = 1.0; lastZoomScale = 1.0
+                                        panOffset = .zero; lastPanOffset = .zero
+                                    }
+                                }
                         } else {
                             VStack(spacing: 10) {
                                 Image(systemName: "film")
@@ -244,6 +281,7 @@ struct ContentView: View {
                             }
                         }
                     }
+                    .clipped()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     Divider()
